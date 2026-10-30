@@ -1,0 +1,602 @@
+# Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
+
+> **Platzhalter-Konvention:** Alle Werte in `<...>` sind durch deine individuellen Werte zu ersetzen:
+>
+> | Platzhalter | Bedeutung | Beispiel |
+> |---|---|---|
+> | `<DOMAIN>` | Deine externe Domain | `example.duckdns.org` |
+> | `<FUTRO_IP>` | Feste IP des Futro | `192.168.10.5` |
+> | `<SRV_IP>` | Feste IP des Proxmox-Hauptserver | `192.168.10.10` |
+> | `<T630_IP>` | Feste IP des T630 | `192.168.10.20` |
+> | `<USER>` | Dein sudo-Benutzer | `admin` |
+> | `<WG_PORT>` | WireGuard-Port | `51820` |
+> | `<HETZNER_USER>` | Hetzner Storage Box Benutzer | `u12345` |
+> | `<HBX_HOST>` | Hetzner Storage Box Host | `u12345.your-storagebox.de` |
+> | `<HETZNER_SUBID>` | Storage Box Sub-ID | `s12345` |
+> | `<NETZ>` | Dein LAN-Subnetz | `192.168.10.0/24` |
+> | `<WG_NETZ>` | WireGuard-Subnetz | `10.10.0.0/24` |
+
+**Golden Rule vor jedem Schritt:** Aktuelles Backup vorhanden? Dann erst weitermachen.
+
+---
+
+## Phase 0 – Vorbereitung, Backup-Basis & UDM-Hardening
+
+### 0.1 Hetzner Storage Box & restic einrichten (auf dem aktuellen Unraid-Server bzw. späteren Hauptserver)
+
+```bash
+# restic installieren (Debian/Ubuntu)
+sudo apt update && sudo apt install -y restic
+
+# SSH-Zugang zur Storage Box testen (Hetzner: ssh auf Port 23, Subuser anlegen!)
+# Wichtig: In der Hetzner-Konsole einen Sub-Account mit Subpath anlegen,
+# z. B. /home/<HETZNER_SUBID>/restic  und SSH-Key-Auth aktivieren
+ssh -p 23 <HETZNER_USER>@<HBX_HOST> "mkdir -p restic"
+
+# SSH-Key fuer die Box erzeugen (nur fuer Backup, ohne Passphrase, da Cron-Job)
+ssh-keygen -t ed25519 -f ~/.ssh/hetzner_bfx -N ""
+ssh-copy-id -p 23 -i ~/.ssh/hetzner_bfx.pub <HETZNER_USER>@<HBX_HOST>
+
+# ~/.ssh/config Eintrag ergaenzen:
+cat >> ~/.ssh/config <<'EOF'
+Host hbx
+    HostName <HBX_HOST>
+    User <HETZNER_USER>
+    Port 23
+    IdentityFile ~/.ssh/hetzner_bfx
+EOF
+chmod 600 ~/.ssh/config
+
+# Restic-Repository initialisieren (verschluesselt!)
+# PASSPHRASE: lang & zufaellig erzeugen und auf USB-Stick sichern (siehe 0.2)
+openssl rand -base64 32   # -> Ausgabe = <RESTIC_PASSPHRASE>
+export RESTIC_REPOSITORY="sftp:hbx:restic"
+export RESTIC_PASSWORD="<RESTIC_PASSPHRASE>"
+restic init
+```
+
+### 0.2 Passphrase/Key auf USB-Stick verwahren
+
+```bash
+# Zwei USB-Sticks mounten (z. B. /media/usb1 und /media/usb2), dann:
+echo "<RESTIC_PASSPHRASE>" > /media/usb1/restic_key.txt
+echo "<RESTIC_PASSPHRASE>" > /media/usb2/restic_key.txt
+chmod 600 /media/usb1/restic_key.txt /media/usb2/restic_key.txt
+# Stick 1: Tresor o. ae. - Stick 2: anderer Ort. NICHT auf Server lassen, NICHT in Vaultwarden.
+```
+
+### 0.3 Backup-Job einrichten (Cron)
+
+```bash
+sudo tee /etc/restic-env <<'EOF'
+export RESTIC_REPOSITORY="sftp:hbx:restic"
+export RESTIC_PASSWORD="<RESTIC_PASSPHRASE>"
+EOF
+sudo chmod 600 /etc/restic-env
+
+# Backup-Skript
+sudo tee /usr/local/bin/backup-offsite.sh <<'EOF'
+#!/bin/bash
+set -e
+source /etc/restic-env
+# Pfade anpassen: Unraid-Shares bzw. spaeter Proxmox-Datasets
+restic backup /mnt/user/nextcloud /mnt/user/paperless /mnt/user/vaultwarden \
+  --tag daily
+# Alte Snapshots aufraeumen (Keep: 7 Tage, 4 Wochen, 6 Monate)
+restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+EOF
+sudo chmod +x /usr/local/bin/backup-offsite.sh
+
+# Cron: taeglich 02:00 Uhr
+echo "0 2 * * * root /usr/local/bin/backup-offsite.sh >> /var/log/restic.log 2>&1" \
+  | sudo tee /etc/cron.d/restic-backup
+```
+
+### 0.4 Restore-Test (PFLICHT vor Weitermachen!)
+
+```bash
+source /etc/restic-env
+restic snapshots                      # Backups listen
+restic restore latest --target /tmp/restore-test --path /mnt/user/vaultwarden
+diff -r /mnt/user/vaultwarden /tmp/restore-test/mnt/user/vaultwarden && echo "RESTORE OK"
+rm -rf /tmp/restore-test
+```
+
+### 0.5 Netzwerk-/IP-Plan dokumentieren (Beispiel als Ausgangspunkt)
+
+```
+Trusted VLAN 10: 192.168.10.0/24   (Laptops, Handys, Server, T630, Futro)
+IoT VLAN 20:    192.168.20.0/24   (Zigbee-Geraete via Z2M, Kameras, Smart-Home)
+Gast VLAN 30:   192.168.30.0/24   (nur Internet)
+WG-Netz:        10.10.0.0/24     (WireGuard-Clients)
+
+Feste IPs:
+<FUTRO_IP>  = 192.168.10.5   (Edge-Box: AdGuard, NPM, CrowdSec, DDNS)
+<SRV_IP>    = 192.168.10.10  (Proxmox-Hauptserver)
+<T630_IP>   = 192.168.10.20  (HA, MQTT, Z2M)
+```
+
+### 0.6–0.7 UDM Pro härten (Konsole/GUI-Schritte)
+
+1. Unifi-UI → **Settings → Internet Security / Telemetrie**: Datenfreigabe minimieren
+2. **Settings → System → Remote Access**: Cloud-Fernverwaltung **deaktivieren**
+3. Unifi-Konto: **2FA aktivieren** (account.ui.com → Security)
+4. Settings → System → Firmware: Auto-Update **aus**, nur Benachrichtigung; Updates manuell im Wartungsfenster
+5. Firewall-Regel: Management (UDM-UI 443/8443, SSH 22) nur aus `<NETZ>` und `<WG_NETZ>` erlauben
+6. Keine Port-Forwards auf UDM-Dienste (nur spaeter 80/443 → Futro)
+
+### 0.8 WireGuard auf der UDM
+
+1. Unifi-UI → **Settings → VPN → WireGuard** → Server erstellen
+2. Port: `<WG_PORT>`, Netz: `10.10.0.0/24`
+3. Client (z. B. Handy) hinzufügen, Konfigurations-QR scannen
+4. UDM-Firewall: `<WG_NETZ>` darf Management + Vaultwarden-Host erreichen
+
+### ✔ Abschlusstest Phase 0
+
+```bash
+# Restore-Test (0.4) lieferte "RESTORE OK"
+grep -c "error" /var/log/restic.log || echo "keine Fehler im Log"
+```
+- [ ] Restore-Test bestanden
+- [ ] UDM von extern NICHT erreichbar (Handy im Mobilfunk: `https://<WAN-IP>` scheitert)
+- [ ] 2FA-Login auf Unifi-Konto funktioniert
+- [ ] WireGuard-Verbindung von extern aufgebaut; Management + künftiger Vaultwarden-Zugang über VPN erreichbar
+
+---
+
+## Phase 1 – Futro S920 als Edge-Box
+
+### 1.1 Debian installieren & Grundhärtung
+
+```bash
+# Debian netinst (aktuelles stable) von debian.org als USB-Stick:
+#   dd if=debian-netinst.iso of=/dev/sdX bs=4M status=progress
+# Installation: nur SSH-Server + Standard-System, Benutzer <USER> anlegen
+
+# Nach Installation auf dem Futro:
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y sudo curl git
+
+# SSH haerten: nur Key-Auth, kein root-login
+sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+# Lokalen Key hinterlegen (von deinem Rechner):
+#   ssh-copy-id <USER>@<FUTRO_IP>
+
+# Automatische Sicherheitsupdates
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# Statische IP setzen (z. B. /etc/network/interfaces oder netplan je nach Setup):
+# Beispiel systemd-networkd (/etc/systemd/network/10-lan.network)
+sudo tee /etc/systemd/network/10-lan.network <<'EOF'
+[Match]
+Name=enp1s0
+[Network]
+Address=<FUTRO_IP>/24
+Gateway=<GATEWAY_IP>
+DNS=127.0.0.1   # AdGuard laeuft spaeter lokal
+EOF
+sudo systemctl restart systemd-networkd
+```
+
+### 1.2 Docker + Compose
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker <USER>
+# neu einloggen, dann:
+mkdir -p ~/edge/{adguard,npm,crowdsec,ddns}
+```
+
+### 1.3 AdGuard migrieren (vom T630 auf den Futro)
+
+```bash
+# Auf dem T630: AdGuard-Config exportieren
+docker exec adguard /bin/sh -c 'tar czf - /opt/adguardhome/conf' > adguard-backup.tar.gz
+scp adguard-backup.tar.gz <USER>@<FUTRO_IP>:~/edge/adguard/
+
+# Auf dem Futro:
+cd ~/edge/adguard && tar xzf adguard-backup.tar.gz
+# In conf/yaml: listen-port 53 pruefen, gebundene IP auf <FUTRO_IP> setzen
+
+docker run -d --name adguard --restart always \
+  -p 53:53/tcp -p 53:53/udp \
+  -v ~/edge/adguard/opt/adguardhome/conf:/opt/adguardhome/conf \
+  -v ~/edge/adguard/opt/adguardhome/work:/opt/adguardhome/work \
+  adguard/adguardhome:latest
+
+# Test vom Client (DNS-Server manuell auf <FUTRO_IP> stellen oder per DHCP):
+dig @<FUTRO_IP> example.com
+```
+
+### 1.4 Alter AdGuard auf dem T630 (erst nach Abschlusstest stoppen!)
+
+```bash
+# Auf dem T630 (erst nachdem alles ueber den Futro laeuft):
+docker stop adguard && docker rm adguard
+```
+
+### 1.5 CrowdSec + NPM
+
+```bash
+cd ~/edge/crowdsec
+cat > docker-compose.yml <<'EOF'
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: always
+    environment:
+      COLLECTIONS: "crowdsecurity/nginx-proxy-manager crowdsecurity/http-cve"
+    volumes:
+      - ./config:/etc/crowdsec
+      - ./data:/var/lib/crowdsec
+      - nginx-logs:/var/log/nginx:ro
+  npm:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: npm
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:81:81"
+    volumes:
+      - ./npm-data:/data
+      - ./npm-letsencrypt:/etc/letsencrypt
+volumes:
+  nginx-logs:
+EOF
+docker compose up -d
+
+# Bouncer registrieren (API-Key generieren):
+docker exec crowdsec cscli bouncers add npm-bouncer
+# -> Ausgabe: <BOUNCER_KEY>
+
+# Middleware in NPM: Stream-Config + CrowdSec-Bouncer (Plugin) einbinden:
+# Im NPM-Admin-UI (http://<FUTRO_IP>:81, admin/changeme sofort aendern!)
+# unter Settings -> crowdsec die <BOUNCER_KEY> eintragen.
+
+# CrowdSec-Status pruefen:
+docker exec crowdsec cscli bouncers list
+docker exec crowdsec cscli alerts list
+```
+
+### 1.6 DDNS-Updater
+
+```bash
+cd ~/edge/ddns
+cat > docker-compose.yml <<'EOF'
+services:
+  ddns:
+    image: qmcgaw/ddns-updater
+    container_name: ddns
+    restart: always
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/updater/data
+EOF
+# In data/config.json (Beispiel fuer DuckDNS; Provider-spezifisch anpassen):
+cat > data/config.json <<'EOF'
+{
+  "settings": [],
+  "answers": ["<DOMAIN>"],
+  "providers": [{
+    "provider": "duckdns",
+    "zone": "<DOMAIN>",
+    "domain": "<DOMAIN>",
+    "token": "<DDNS_TOKEN>"
+  }]
+}
+EOF
+docker compose up -d
+curl -s http://127.0.0.1:8000/update   # manuelles Update triggern, dann Provider-Konsole pruefen
+```
+
+### 1.7 NPM Proxy-Hosts anlegen (im Admin-UI `http://<FUTRO_IP>:81`)
+
+- Proxy-Host `cloud.<DOMAIN>` → `http://<SRV_IP>:<PORT_NEXTCLOUD>` (Let's-Encrypt-Zertifikat, HTTP-Verifikation)
+- Proxy-Host `ha.<DOMAIN>` → `http://<T630_IP>:8123`
+- Erzwingen: „Websockets Support" für HA aktivieren
+
+### 1.8 Cutover Port-Forwards (UDM-UI)
+
+1. Alte Port-Forwards 80/443 (auf Unraid-NPM) **löschen**
+2. Neue Port-Forwards: 80 + 443 → `<FUTRO_IP>`
+3. Von extern (Mobilfunk) testen:
+   - `https://cloud.<DOMAIN>` → Nextcloud-Login
+   - `https://ha.<DOMAIN>` → HA-Login
+
+### 1.9 Vaultwarden nur via VPN
+
+1. NPM: Proxy-Host `vault.<DOMAIN>` → `http://<SRV_IP>:<PORT_VAULTWARDEN>`
+2. NPM: Access List „vpn-only" anlegen: erlaubt `10.10.0.0/24` (WG-Netz), alle anderen blockiert
+3. Access List dem Proxy-Host zuweisen
+
+```bash
+# Test von extern (ohne VPN) – MUSS scheittern:
+curl -k --max-time 5 https://vault.<DOMAIN> && echo "FEHLER: erreichbar!" || echo "OK: blockiert"
+# Test im VPN – muss funktionieren:
+curl -k https://vault.<DOMAIN> | head -3
+```
+
+### 1.10 Futro-Image fuer Kaltreserve + Config-Backup
+
+```bash
+# Compose-Configs ins restic-Backup:
+source /etc/restic-env
+restic backup ~/edge --tag futro-config
+
+# SSD-Image mit Clonezilla (von USB-Stick booten, Futro-SSD -> externen USB-Stick klonen)
+# Alternativ live (Futro im Single-User/Recovery), grob:
+#   sudo dd if=/dev/sda of=/media/usb/futro-image.img bs=4M status=progress
+```
+
+### ✔ Abschlusstest Phase 1
+
+- [ ] `dig @<FUTRO_IP> example.com` liefert Antworten; Internet auf allen Geraeten (Trusted/IoT/Gast) funktioniert
+- [ ] T630-AdGuard gestoppt, DNS laeuft stabil ueber Futro
+- [ ] `https://cloud.<DOMAIN>` und `https://ha.<DOMAIN>` extern erreichbar, gueltiges Zertifikat
+- [ ] CrowdSec: `cscli decisions add --ip 1.2.3.4` → Test-Zugriff von dort (oder mit curl von extern gegen NPM mit gebannter Test-IP) wird geblockt; danach `cscli decisions remove --ip 1.2.3.4`
+- [ ] Vaultwarden ohne VPN blockiert, mit VPN erreichbar (curl-Tests oben)
+- [ ] DDNS-Eintrag beim Provider stimmt mit aktueller WAN-IP ueberein
+- [ ] Clonezilla-/Image-Backup liegt vor, Kaltreserve dokumentiert
+
+---
+
+## Phase 2 – Hauptserver: Unraid → Proxmox
+
+### 2.1 Finale Vollbackups (VOR dem Umbau, Unraid laeuft noch)
+
+```bash
+# Auf Unraid: Daten-Sync zur Hetzner-Box (restic, siehe Phase 0) einmal manuell:
+/usr/local/bin/backup-offsite.sh
+
+# Zusaetzlich physisch: Daten auf die freie 3TB-HDD kopieren:
+rsync -avh --progress /mnt/user/nextcloud/ /mnt/disks/<FREIE_HDD>/nextcloud/
+rsync -avh --progress /mnt/user/paperless/ /mnt/disks/<FREIE_HDD>/paperless/
+```
+
+### 2.2 Proxmox installieren
+
+1. Proxmox-VE-ISO von proxmox.com laden, USB-Stick: `dd if=proxmox.iso of=/dev/sdX bs=4M`
+2. Boot: 250-GB-SSD als Ziel, ext4 (Boot-Platte), Land: de, Keyboard: de
+3. Management-IP: `<SRV_IP>/24`, Gateway `<GATEWAY_IP>`
+4. Nach Installation: Web-UI `https://<SRV_IP>:8006`
+5. Repositories umstellen (kein Enterprise-Repo ohne Abo):
+
+```bash
+# Auf Proxmox-Host:
+sed -i.bak 's/^deb/#deb/' /etc/apt/sources.list.d/pve-enterprise.list
+echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" \
+  > /etc/apt/sources.list.d/pve-no-subscription.list
+apt update && apt full-upgrade -y
+```
+
+### 2.3 ZFS-Storage anlegen (nach Installation, in Proxmox-Shell)
+
+```bash
+# 1TB NVMe = 'fast' (LXC-Disks, DBs)
+zpool create -o ashift=12 fast /dev/disk/by-id/nvme-<NVME_ID>
+
+# 3TB HDD = 'bulk' (Files, Docs, vzdump)
+zpool create -o ashift=12 bulk /dev/disk/by-id/ata-<HDD_ID>
+
+# Datasets (saubere Snapshot-/Quota-Politik je Dataset):
+zfs create bulk/nextcloud
+zfs create bulk/paperless
+zfs create bulk/immich
+zfs create bulk/cameras      # Snapshot-Politik: deaktiviert/24h (s. 2.4)
+zfs create bulk/vzdump
+
+# Proxmox-Storage einbinden (GUI: Datacenter -> Storage -> Add):
+#   fast  : ZFS-Storage (oder Verzeichnis /fast via Verwaltung)
+#   bulk/vzdump : "Backup"-Typ
+```
+
+### 2.4 zfs-auto-snapshot
+
+```bash
+apt install -y zfs-auto-snapshot
+# Standard: alles snapshots. Kameras begrenzen:
+zfs set com.sun:auto-snapshot=false bulk/cameras
+# (oder frequelle Politiken je Dataset anpassen: zfs set com.sun:auto-snapshot:daily=true ...)
+```
+
+### 2.5 LXC-Migration – Reihenfolge & generisches Muster
+
+Je Dienst (Vaultwarden → Paperless → Traccar → Immich → Nextcloud):
+
+```bash
+# 1. Template herunterladen (GUI oder CLI):
+pveam update && pveam available --section system
+pveam download local debian-12-standard_12.7-1_amd64.tar.zst
+
+# 2. LXC anlegen (GUI: Create CT, unprivileged, nesting fuer Docker-frei LXCs)
+#    oder CLI-Beispiel Vaultwarden:
+pct create 101 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
+  --hostname vaultwarden --memory 512 --swap 512 \
+  --net0 name=eth0,bridge=vmbr0,ip=<VAULT_IP>/24,gw=<GATEWAY_IP> \
+  --rootfs fast:8 --unprivileged 1 --features nesting=1 \
+  --start 1
+
+# 3. Im LXC: Dienst installieren (Vaultwarden-Beispiel, Docker im LXC):
+pct enter 101
+apt update && apt install -y curl
+curl -fsSL https://get.docker.com | sh
+mkdir -p /opt/vw && cd /opt/vw
+cat > docker-compose.yml <<'EOF'
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    restart: always
+    environment:
+      DOMAIN: "https://vault.<DOMAIN>"
+      SIGNUPS_ALLOWED: "false"      # Geschlossen halten!
+    volumes:
+      - ./data:/data
+    ports:
+      - "<PORT_VAULTWARDEN>:80"
+EOF
+docker compose up -d
+
+# 4. Daten migrieren (von Unraid auf LXC):
+rsync -avh --progress <USER>@<UNRAID_IP>:/mnt/user/vaultwarden/ /opt/vw/data/
+# bzw. DB-Dumps bei DB-gestuetzten Diensten:
+#   docker exec <DB_CONTAINER> mysqldump ... > dump.sql  (Nextcloud!)
+
+# 5. Intern testen: http://<VAULT_IP>:<PORT_VAULTWARDEN> (Login, Sync-Test)
+
+# 6. NPM-Proxy auf neue IP umstellen (NPM-UI), dann alten Unraid-Dienst stoppen.
+```
+
+**Nextcloud-Spezifisch (Downtime-Fenster):**
+
+```bash
+# Vorab (im Betrieb) - Vorab-Sync der Files:
+rsync -avh --progress <USER>@<UNRAID_IP>:/mnt/user/nextcloud/ /bulk/nextcloud/
+
+# Im Wartungsfenster:
+# Unraid: Nextcloud in Wartungsmodus:
+sudo -u www-data php occ maintenance:mode --on
+# Finaler Delta-Sync:
+rsync -avh --delete --progress <USER>@<UNRAID_IP>:/mnt/user/nextcloud/ /bulk/nextcloud/
+# DB-Dump auf Unraid ziehen und im neuen LXC importieren:
+docker exec <DB_CONTAINER> mysqldump -u <DB_USER> -p<DB_PW> nextcloud > nextcloud-db.sql
+# Neuer LXC: DB-Container starten, Dump einspielen:
+docker exec -i <DB_CONTAINER> mysql -u <DB_USER> -p<DB_PW> nextcloud < nextcloud-db.sql
+# Config anpassen (DB-Host, Datenpfad), maintenance:mode --off, dann testen.
+```
+
+**Immich (nach Nextcloud-Vorbereitung, gleiche Phase):**
+
+```bash
+# LXC mit mehr Ressourcen (ML braucht CPU): 4 vCPU, 4-8GB RAM
+# Files -> bulk/immich, DB/Thumbs -> fast (NVMe)
+# Docker-Compose aus offiziellem Immich-Repo, .env mit Pfaden auf die Datasets.
+```
+
+### 2.6 Reolink-Aufnahmen auf Netzwerk-Target
+
+```bash
+# SMB-Share bereitstellen (Samba auf Proxmox-Host oder eigener kleiner LXC):
+zfs create bulk/cameras
+apt install -y samba
+# /etc/samba/smb.conf Eintrag:
+cat >> /etc/samba/smb.conf <<'EOF'
+[cameras]
+   path = /bulk/cameras
+   valid users = <CAM_USER>
+   read only = no
+EOF
+smbpasswd -a <CAM_USER>
+systemctl restart smbd
+
+# Reolink-Kamera/Web-UI: Aufnahmen -> FTP/SMB-Upload auf \\<SRV_IP>\cameras
+# In Reolink-App (bzw. Home Assistant Reolink-Integration) pruefen, dass Clips ankommen.
+```
+
+### 2.7 T630-Backups anbinden
+
+```bash
+# Auf Proxmox-Hauptserver: NFS-Server oder simpler SSH-Zielbereich:
+mkdir -p /bulk/vzdump/t630
+# Auf dem T630 (Proxmox): Backup-Job einrichten:
+#   /etc/pve/jobs.cfg oder GUI: Datacenter -> Backup -> Add
+#   Storage: NFS-Mount auf <SRV_IP>:/bulk/vzdump/t630 (oder SSH/SFTP-Ziel)
+# Test-Backup eines LXC auf dem T630:
+vzdump 100 --storage <NFS_STORAGE> --mode snapshot
+```
+
+### 2.8 Regelmäßige Proxmox-Backups (Hauptserver)
+
+```bash
+# GUI: Datacenter -> Backup -> Add: 
+#   Storage: bulk/vzdump, Schedule: So 03:00, Mode: snapshot,Retention: 4 Wochen
+# Alternativ CLI-Test eines LXCs:
+vzdump 101 --storage <BULK_STORAGE> --mode snapshot --compress zstd
+```
+
+### ✔ Abschlusstest Phase 2
+
+```bash
+zfs list -t snapshot | head -20      # Snapshots werden automatisch erzeugt
+vzdump <CTID> --storage <BULK_STORAGE> --mode snapshot  # manueller Test-Backup
+pct restore 999 <BACKUP-DATEI> --storage fast   # Restore-Test in eine Test-CT (danach loeschen!)
+```
+- [ ] Vaultwarden, Paperless, Traccar, Immich, Nextcloud: alle laufen auf Proxmox, Login/Upload/Sync getestet
+- [ ] Vaultwarden weiterhin VPN-only (curl-Test wiederholen)
+- [ ] Reolink-Clips landen auf `bulk/cameras`
+- [ ] vzdump-Restore in Test-CT erfolgreich
+- [ ] T630-Backup-Job laeuft, Dateien liegen auf dem Hauptserver
+- [ ] Unraid stillgelegt (keine laufenden Dienste, Port-Forwards restlos entfernt)
+
+---
+
+## Phase 3 – Finalisierung
+
+### 3.1 Dritte HDD: Mirror + dediziertes Backup-Ziel
+
+```bash
+# Empfehlung: 2x3TB als Mirror + 1x3TB separat fuer vzdump
+# (Benoetigt Re-Layout von Phase 2.3; wenn bereits umgesetzt -> ueberspringen)
+zpool create -o ashift=12 bulk mirror /dev/disk/by-id/ata-<HDD1_ID> /dev/disk/by-id/ata-<HDD2_ID>
+zpool create -o ashift=12 backup /dev/disk/by-id/ata-<HDD3_ID>
+zfs create backup/vzdump
+# vzdump-Storage auf backup/vzdump umstellen (GUI: Storage-Pfad aendern)
+```
+
+### 3.2 Kamera-Dataset aufräumen
+
+```bash
+# Alte Aufnahmen automatisch entfernen (Platz!):
+cat > /etc/cron.daily/camcleanup <<'EOF'
+#!/bin/bash
+find /bulk/cameras -type f -mtime +14 -delete
+EOF
+chmod +x /etc/cron.daily/camcleanup
+```
+
+### 3.3 Monitoring/Alarmierung
+
+```bash
+# Healthchecks.io (kostenlos): Check anlegen, URL = <HEALTHCHECK_URL>
+# Am Ende des Backup-Skripts:
+echo 'curl -fsS --retry 3 <HEALTHCHECK_URL> > /dev/null' >> /usr/local/bin/backup-offsite.sh
+# -> Bleibt ein Ping aus, kommt eine E-Mail. Damit schlaeft kein silently totes Backup.
+```
+
+### 3.4 Restore-Drill (der wichtigste Schritt!)
+
+```bash
+source /etc/restic-env
+restic snapshots
+# Nextcloud + Vaultwarden + T630-LXC aus Hetzner-Backup in Test-Umgebung:
+restic restore latest --target /tmp/drill --path /bulk/nextcloud
+restic restore latest --target /tmp/drill --path /opt/vw/data
+# Funktionalitaet pruefen: DB-Import in Test-DB, Vaultwarden-Items lesbar?
+rm -rf /tmp/drill
+```
+
+### ✔ Abschlusstest Phase 3 (Gesamtabnahme)
+
+- [ ] Mirror + Backup-HDD eingebunden, vzdump schreibt auf dediziertes Ziel (getrennt vom Datenpool)
+- [ ] Restore-Drill erfolgreich (Nextcloud, Vaultwarden, T630-LXC funktional geprueft)
+- [ ] Healthchecks-Ping kommt an (Test-Alarm einmal provoziert)
+- [ ] Kamera-Cleanup-Job vorhanden (`ls /etc/cron.daily/camcleanup`)
+- [ ] Doku: IP-Plan, Restore-Anleitung, USB-Stick-Verwahrungsorte in Paperless abgelegt
+- [ ] Kaltreserve-Futro: Image + Wiederinbetriebnahme-Anleitung (<30 Min) dokumentiert
+
+---
+
+## Backup-Übersicht (3-2-1)
+
+| Stufe | Mechanismus | Ziel | Rhythmus |
+|---|---|---|---|
+| 1 | ZFS-Snapshots (zfs-auto-snapshot) | lokal (NVMe + HDD) | stündlich/täglich |
+| 2 | vzdump aller LXCs (beider Hosts) | backup-HDD im Hauptserver | wöchentlich (So 03:00) |
+| 3 | restic verschlüsselt (Key auf USB-Stick) | Hetzner Storage Box | täglich (02:00) |
