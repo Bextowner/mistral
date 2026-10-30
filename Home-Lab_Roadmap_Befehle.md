@@ -15,12 +15,106 @@
 > | `<HETZNER_SUBID>` | Storage Box Sub-ID | `s12345` |
 > | `<NETZ>` | Dein LAN-Subnetz | `192.168.10.0/24` |
 > | `<WG_NETZ>` | WireGuard-Subnetz | `10.10.0.0/24` |
+> | `<UNRAID_IP>` | IP des Unraid-Servers (heute) | `192.168.10.30` |
+> | `<EXT_DEV>` | Externe Backup-Platte | `/dev/sdE` |
+> | `<HDD_DEV>` | 3-TB-HDD (Pool-Kandidat) | `/dev/sdb` |
+> | `<GATEWAY_IP>` | Gateway (UDM Pro) | `192.168.10.1` |
+> | `<SHARE_MIT_PLATZ>` | Unraid-Share mit Platz für Doku/Backups | `backup` |
 
 **Golden Rule vor jedem Schritt:** Aktuelles Backup vorhanden? Dann erst weitermachen.
+
+**Leitlinie:** Datensicherheit vor Geschwindigkeit.
+
+**Rollback-Prinzip (wichtigstes Sicherheitsnetz der gesamten Migration):** Die alten
+Unraid-Datenplatten werden beim Umbau **ausgebaut, beschriftet und antistatisch gelagert**
+und bleiben **UNANGETASTET**, bis alle Abschlusstests von Phase 3 bestanden sind.
+Notfall-Rollback = Platten wieder einbauen, Unraid-Stick booten, Array starten – fertig.
+Erst danach werden sie gelöscht oder einem Pool zugeführt (siehe 3.4).
 
 ---
 
 ## Phase 0 – Vorbereitung, Backup-Basis & UDM-Hardening
+
+### 0.0a Bestandsaufnahme & Inventur (auf dem Unraid-Server)
+
+```bash
+ssh root@<UNRAID_IP>
+mkdir -p /boot/migration-doku
+
+# Platten, Geräte, Seriennummern erfassen und dokumentieren:
+lsblk -o NAME,SIZE,MODEL,SERIAL,MOUNTPOINT | tee /boot/migration-doku/lsblk.txt
+
+df -h /mnt/user /mnt/cache
+
+# Datenmengen je Share (für Zeitplanung des rsync):
+du -sh /mnt/user/* | sort -h | tee /boot/migration-doku/du-shares.txt
+```
+
+### 0.0b SMART-Gate (nur einwandfreie Platten wandern in den ZFS-Pool)
+
+**Kriterium: Reallocated / Pending / Uncorrectable = 0. Platten mit Wert > 0 NICHT
+für den Pool verwenden.**
+
+```bash
+apt install -y smartmontools   # falls nicht vorhanden
+
+for d in /dev/sd? /dev/nvme?n1; do
+  echo "=== $d ==="
+  smartctl -H -A $d | grep -E "overall|Reallocated|Pending|Uncorrectable|Power_On|Percentage Used|Media and Data"
+done | tee /boot/migration-doku/smart-uebersicht.txt
+
+# Für die 3 zukünftigen Pool-HDDs: Langen Selbsttest ausführen (dauert Stunden!)
+smartctl -t long /dev/<HDD_DEV>
+# später Ergebnis prüfen:
+smartctl -l selftest /dev/<HDD_DEV>
+```
+
+### 0.0c Docker-Container dokumentieren (Vorbereitung der Migration)
+
+```bash
+docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}" \
+  > /boot/migration-doku/container-liste.txt
+
+for c in $(docker ps -aq); do
+  docker inspect $c > /boot/migration-doku/inspect-$(docker inspect --format '{{.Name}}' $c | tr -d '/').json
+done
+
+# Unraid-Docker-Templates mitkopieren (enthält alle ENV/Volumes/Ports!):
+cp -r /boot/config/plugins/dockerMan/templates-user /boot/migration-doku/templates
+
+# Doku AUSSERHALB des Servers sichern (Laptop o. ä.):
+# scp -r root@<UNRAID_IP>:/boot/migration-doku ~/migration-doku/
+```
+
+### 0.0d Unraid-Flash-Backup
+
+```bash
+cp -r /boot /mnt/user/<SHARE_MIT_PLATZ>/unraid-flash-backup-$(date +%F)
+# ZUSÄTZLICH über die GUI: Main > Flash > Flash Backup
+# Datei außerhalb von Unraid ablegen (Laptop, externe Platte)
+```
+
+### 0.0e Geheimnisse/Secrets sichern (vor der Migration, PFLICHT!)
+
+Diese Werte gehen bei einer Neu-Installation verloren und müssen extern gesichert sein:
+
+| Was | Wie sichern |
+|---|---|
+| Vaultwarden Vault | GUI: Tools > Export Vault > **.json Encrypted** (Passwort-Wortfolge separat notieren) |
+| Vaultwarden `ADMIN_TOKEN`, `rsa_key.*` | aus Appdata-Verzeichnis, in Passwortmanager |
+| Nextcloud `config.php` | `passwordsalt`, `secret`, `instanceid` (in Passwortmanager, nie im Klartext in Git) |
+| Paperless `PAPERLESS_SECRET_KEY` | aus Docker-Template/ENV, in Passwortmanager |
+| DDNS-Updater API-Token | Provider-Konsole bzw. ENV |
+| CrowdSec Enrollment-Key | `cscli`-Ausgabe bzw. Config |
+| Restic-Passphrase | USB-Stick (0.2) + Passwortmanager als Backup |
+
+```bash
+# Beispiel Vaultwarden-Keys aus dem Unraid-Appdata-Verzeichnis:
+tar czf /mnt/user/<SHARE_MIT_PLATZ>/vaultwarden-keys-$(date +%F).tgz \
+  /mnt/user/appdata/vaultwarden/
+# Achtung: diese Datei NICHT unverschlüsselt in Git oder Cloud ablegen!
+# Auf dem Laptop verschlüsselt ablegen (z. B. 7z/gpg).
+```
 
 ### 0.1 Hetzner Storage Box & restic einrichten (auf dem aktuellen Unraid-Server bzw. späteren Hauptserver)
 
@@ -139,6 +233,9 @@ Feste IPs:
 grep -c "error" /var/log/restic.log || echo "keine Fehler im Log"
 ```
 - [ ] Restore-Test bestanden
+- [ ] **Inventur mit Seriennummern erstellt (0.0a), SMART aller Pool-Kandidaten unauffällig (0.0b)**
+- [ ] **Container-Doku + Unraid-Flash-Backup außerhalb des Servers abgelegt (0.0c/0.0d)**
+- [ ] **Vaultwarden-Export (verschlüsselt, .json) + alle Secrets extern gesichert (0.0e)**
 - [ ] UDM von extern NICHT erreichbar (Handy im Mobilfunk: `https://<WAN-IP>` scheitert)
 - [ ] 2FA-Login auf Unifi-Konto funktioniert
 - [ ] WireGuard-Verbindung von extern aufgebaut; Management + künftiger Vaultwarden-Zugang über VPN erreichbar
@@ -356,9 +453,67 @@ restic backup ~/edge --tag futro-config
 # Auf Unraid: Daten-Sync zur Hetzner-Box (restic, siehe Phase 0) einmal manuell:
 /usr/local/bin/backup-offsite.sh
 
-# Zusaetzlich physisch: Daten auf die freie 3TB-HDD kopieren:
-rsync -avh --progress /mnt/user/nextcloud/ /mnt/disks/<FREIE_HDD>/nextcloud/
-rsync -avh --progress /mnt/user/paperless/ /mnt/disks/<FREIE_HDD>/paperless/
+# ZUSAETZLICH auf eine externe Platte als komplette zweite Kopie (3-2-1!):
+# ACHTUNG: Formatierung loescht alles auf dem Datentraeger,
+# vorher zwingend mit lsblk identifizieren:
+lsblk
+parted /dev/<EXT_DEV> --script mklabel gpt mkpart primary ext4 0% 100%
+mkfs.ext4 -L migration-backup /dev/<EXT_DEV>1
+mkdir -p /mnt/disks/extern
+mount /dev/<EXT_DEV>1 /mnt/disks/extern
+
+# Nextcloud aufraeumen (spart Platz, reduziert Kopiermenge):
+docker exec -u www-data <NEXTCLOUD_CONTAINER> php occ trashbin:cleanup --all-users
+docker exec -u www-data <NEXTCLOUD_CONTAINER> php occ versions:cleanup
+docker exec -u www-data <NEXTCLOUD_CONTAINER> php occ files:scan --all
+docker image prune -a
+
+# DB-Dumps der datenbankgestuetzten Dienste ziehen:
+docker exec <DB_CONTAINER> mysqldump -u <DB_USER> -p<DB_PW> <DB_NAME> \
+  > /mnt/user/<SHARE>/db-dumps/nextcloud-db.sql
+# (analog fuer Paperless / Traccar / Immich)
+
+# Vollstaendiger rsync (-aHAX: Hardlinks, ACLs, xattrs erhalten):
+rsync -aHAX --info=progress2 --log-file=/mnt/disks/extern/rsync-backup.log \
+  /mnt/user/ /mnt/disks/extern/backup/
+# Bei Platzmangel optional: --exclude='<ERSETZBARER_SHARE>/'
+
+### VERIFIKATION (Pflicht - Backup zaehlt erst mit leerer Differenz!):
+rsync -aHAXcn --itemize-changes /mnt/user/ /mnt/disks/extern/backup/
+# -> Ausgabe MUSS leer sein
+
+# SHA-256-Stichproben vergleichen (3-5 groessere Dateien):
+sha256sum /mnt/user/nextcloud/<STICHPROBE_DATEI>
+sha256sum /mnt/disks/extern/backup/nextcloud/<STICHPROBE_DATEI>
+
+# Inventar fuer spaetere Gegenpruefung:
+cd /mnt/disks/extern/backup
+find . -type f | wc -l > ../dateianzahl.txt
+du -sh . > ../groesse.txt
+cd ..
+sync
+umount /mnt/disks/extern
+# Platte beschriften und physisch verwahren (2. Kopie, unabhaengig von Hetzner!)
+```
+
+### 2.1a Alte Platten abziehen (Rollback-Sicherung)
+
+```
+# 1. Unraid sauber herunterfahren: Main > Array > Stop, dann Tools > Shutdown
+# 2. Netzteil trennen
+# 3. Platten beschriften (UNRAID-DISK1, UNRAID-DISK2, UNRAID-CACHE
+#    + Seriennummer), ausbauen, antistatisch lagern
+# 4. Unraid-USB-Stick separat aufbewahren, NICHT ueberschreiben
+# 5. 250-GB-SSD und die ungenutzte 3-TB-HDD einbauen, NVMe bleibt drin
+# 6. Server startet; BIOS/UEFI zeigt SSD und HDD -> weiter mit 2.2
+```
+
+**NOTFALL-ROLLBACK** (funktioniert nur, solange die Alt-Platten nicht ueberschrieben sind):
+```
+# 1. Proxmox-Host sauber herunterfahren
+# 2. Proxmox-Platten (SSD/NVMe) abziehen
+# 3. Unraid-Platten wieder einbauen, Unraid-Stick anstecken
+# 4. Server starten, Array starten -> Container laufen mit Stand aus 2.1
 ```
 
 ### 2.2 Proxmox installieren
@@ -521,6 +676,19 @@ vzdump 100 --storage <NFS_STORAGE> --mode snapshot
 vzdump 101 --storage <BULK_STORAGE> --mode snapshot --compress zstd
 ```
 
+### 2.9a Beobachtungszeitraum vor Freigabe der Alt-Platten (14 Tage)
+
+Mindestens **14 Tage** nach dem Cutover beobachten, bevor die alten Unraid-Platten
+freigegeben werden (siehe 3.4):
+
+```bash
+zpool status                 # beide Pools ONLINE, keine Fehler
+zpool list -o health         # Scrub-Ergebnisse kontrollieren
+smartctl -H /dev/<POOL_HDD>  # Plattenzustand
+grep -i error /var/log/restic.log | tail   # Hetzner-Backup fehlerfrei?
+# Alle externen Dienste erreichbar? (Handy-Check / Uptime-Kuma)
+```
+
 ### ✔ Abschlusstest Phase 2
 
 ```bash
@@ -532,6 +700,8 @@ pct restore 999 <BACKUP-DATEI> --storage fast   # Restore-Test in eine Test-CT (
 - [ ] Vaultwarden weiterhin VPN-only (curl-Test wiederholen)
 - [ ] Reolink-Clips landen auf `bulk/cameras`
 - [ ] vzdump-Restore in Test-CT erfolgreich
+- [ ] **rsync-Verifikation des externen Backups leer (keine Differenzen), SHA-256-Stichproben identisch (2.1)**
+- [ ] **Alte Unraid-Platten ausgebaut, beschriftet, antistatisch gelagert; Notfall-Rollback dokumentiert (2.1a)**
 - [ ] T630-Backup-Job laeuft, Dateien liegen auf dem Hauptserver
 - [ ] Unraid stillgelegt (keine laufenden Dienste, Port-Forwards restlos entfernt)
 
@@ -570,7 +740,28 @@ echo 'curl -fsS --retry 3 <HEALTHCHECK_URL> > /dev/null' >> /usr/local/bin/backu
 # -> Bleibt ein Ping aus, kommt eine E-Mail. Damit schlaeft kein silently totes Backup.
 ```
 
-### 3.4 Restore-Drill (der wichtigste Schritt!)
+### 3.4 Alte Platten erst nach ALLEN Pruefungen freigeben
+
+```
+# Erst nach 14-taegiger Beobachtung (2.9a) + bestandenem Restore-Drill + nmap-Test:
+# - Platten sicher loeschen: blkdiscard (NVMe) bzw. dd/shred (HDD)
+# - ODER (Empfehlung) dritte 3-TB-HDD dem Pool zufuehren (siehe 3.1)
+# - Externe Backup-Platte als Offline-Kopie weiterverwenden
+# - Unraid-USB-Stick archivieren (nicht loeschen - kostet nichts)
+```
+
+### 3.5 Externer Port-Scan als Abschlusscheck
+
+```bash
+# Von extern (z. B. Handy im Mobilfunk oder VPS):
+nmap -Pn -p- <DEINE_WAN_IP>
+# Erwartung: nur 443 (und ggf. WireGuard-Port) offen, sonst NICHTS
+
+# Auf dem Hauptserver: offene Dienste pruefen:
+ss -tulpn
+```
+
+### 3.6 Restore-Drill (der wichtigste Schritt!)
 
 ```bash
 source /etc/restic-env
@@ -586,6 +777,8 @@ rm -rf /tmp/drill
 
 - [ ] Mirror + Backup-HDD eingebunden, vzdump schreibt auf dediziertes Ziel (getrennt vom Datenpool)
 - [ ] Restore-Drill erfolgreich (Nextcloud, Vaultwarden, T630-LXC funktional geprueft)
+- [ ] **14-Tage-Beobachtung fehlerfrei (zpool status, SMART, restic-Log, Dienste) – erst DANN Alt-Platten freigeben (3.4)**
+- [ ] **nmap von extern zeigt nur 443 (+ ggf. WireGuard), keine weiteren offenen Ports (3.5)**
 - [ ] Healthchecks-Ping kommt an (Test-Alarm einmal provoziert)
 - [ ] Kamera-Cleanup-Job vorhanden (`ls /etc/cron.daily/camcleanup`)
 - [ ] Doku: IP-Plan, Restore-Anleitung, USB-Stick-Verwahrungsorte in Paperless abgelegt
