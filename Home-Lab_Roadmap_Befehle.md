@@ -1,6 +1,17 @@
 # Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
 
-> **Platzhalter-Konvention:** Alle Werte in `<...>` sind durch deine individuellen Werte zu ersetzen:
+> **📄 Dokument-Version: v1.1.0** · Stand: 2026-10-30 · Dieses Dokument ist die **aktuellste Version**.
+>
+> ## Änderungshistorie (Changelog)
+>
+> | Version | Datum | Änderungen |
+> |---|---|---|
+> | **v1.1.0 (aktuell)** | 2026-10-30 | Migrationssicherheit ergänzt: 0.0a Inventur, 0.0b SMART-Gate, 0.0c Container-Doku, 0.0d Flash-Backup, 0.0e Secrets-Export; 2.1 rsync-Verifikation + externe Backup-Platte, 2.1a Alt-Platten-Rollback, 2.9a 14-Tage-Beobachtung; 3.4 Platten-Freigabe, 3.5 nmap-Check; Platzhalter-Tabelle erweitert |
+> | v1.0.0 | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen (Hetzner/restic, Futro-Edge-Box, Proxmox-Migration, Finalisierung), Abschlusstests je Phase |
+>
+> **Git-Tags:** Der Stand jeder Version ist über ein Git-Tag (`v1.0.0`, `v1.1.0`, …) im Repository markiert. Änderungen zwischen Versionen: `git diff v1.0.0 v1.1.0` bzw. auf GitHub unter *Releases/Tags* bzw. im Commit-Vergleich.
+
+**Platzhalter-Konvention:** Alle Werte in `<...>` sind durch deine individuellen Werte zu ersetzen:
 >
 > | Platzhalter | Bedeutung | Beispiel |
 > |---|---|---|
