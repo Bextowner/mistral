@@ -1,11 +1,13 @@
 # Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
 
-> **📄 Dokument-Version: v1.2.0** · Stand: 2026-10-30 · Dieses Dokument ist die **aktuellste Version**.
+> **📄 Dokument-Version: v1.2.2** · Stand: 2026-10-31 · Dieses Dokument ist die **aktuellste Version**.
 >
 > ## Änderungshistorie (Changelog)
 >
 > | Version | Datum | Änderungen |
 > |---|---|---|
+> | **v1.2.2 (aktuell)** | 2026-10-31 | Praxis-Erkenntnisse eingearbeitet: Inventar-Tabelle 0.0a-1 mit erfassten Seriennummern/by-IDs (WD30EFAX x2, CT1000P3SSD8, MQ01ABD100); Hetzner-Sub-Account-SSH-Key-Prozedur (Key via SFTP in ~/.ssh/authorized_keys, Sub-Account-Domain u706080-sub1.your-storagebox.de); Unraid-Hinweis /tmp=RAM (keine großen Restore-Ziele); domains/Macinabox wird nicht migriert (nur lokale Archiv-Kopie); Restore-Repeat mit Macinabox-Exclude |
+> | v1.2.1 | 2026-10-31 | Gemeinsames Dokument: PDF aus Markdown erzeugt, altes Roadmap-PDF eingestellt |
 > | **v1.2.0 (aktuell)** | 2026-10-30 | Beschlüsse aus Vergleich mit Alternativ-Anleitung eingearbeitet: Alt-Platten bleiben EINGEBAUT (2.1a umgeschrieben, Migration über temporären bulk-Pool); tank-Mirror-Endziel + dedizierter backup-Pool mit strikter Abfolge (3.1); sanoid/syncoid-Nächtliche Replikation inkl. readonly-Schutz (3.1a); externe USB-Platte als dauerhaftes lokales restic-Tier (3.1b); DMZ-Option B: Futro in eigenem VLAN mit 5-Regel-Set (0.5 erweitert); TrueNAS als Option geprüft und bewusst verworfen (Architektur-Notiz) |
 > | v1.1.0 | 2026-10-30 | Migrationssicherheit ergänzt: 0.0a Inventur, 0.0b SMART-Gate, 0.0c Container-Doku, 0.0d Flash-Backup, 0.0e Secrets-Export; 2.1 rsync-Verifikation + externe Backup-Platte, 2.1a Alt-Platten-Rollback, 2.9a 14-Tage-Beobachtung; 3.4 Platten-Freigabe, 3.5 nmap-Check; Platzhalter-Tabelle erweitert |
 > | v1.0.0 | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen (Hetzner/restic, Futro-Edge-Box, Proxmox-Migration, Finalisierung), Abschlusstests je Phase |
@@ -27,7 +29,7 @@
 > | `<HETZNER_SUBID>` | Storage Box Sub-ID | `s12345` |
 > | `<NETZ>` | Dein LAN-Subnetz | `192.168.10.0/24` |
 > | `<WG_NETZ>` | WireGuard-Subnetz | `10.10.0.0/24` |
-> | `<ARRAY_HDD1_ID>` / `<ARRAY_HDD2_ID>` | by-id-Kennungen der beiden alten Unraid-Array-Platten | `ata-WDC_WD30..._XXXX` |
+> | `<ARRAY_HDD1_ID>` / `<ARRAY_HDD2_ID>` | by-id-Kennungen der Array-Platten – **erfasst**: `ata-WDC_WD30EFAX-68JH4N0_WD-WX12D4071P2X` / `ata-WDC_WD30EFAX-68JH4N1_WD-WX92D91FJ49T` | siehe Inventar 0.0a-1 |
 > | `<TEMP_HDD_ID>` | by-id-Kennung der bisher ungenutzten 3-TB-HDD (temp. bulk) | `ata-WDC_WD30..._YYYY` |
 > | `<USB_DISK>` / `<USB_UUID>` | Externe USB-Backup-Platte / ihre UUID (`blkid`) | `/dev/sde` |
 > | `<UNRAID_IP>` | IP des Unraid-Servers (heute) | `192.168.10.30` |
@@ -64,6 +66,20 @@ df -h /mnt/user /mnt/cache
 # Datenmengen je Share (für Zeitplanung des rsync):
 du -sh /mnt/user/* | sort -h | tee /boot/migration-doku/du-shares.txt
 ```
+
+### 0.0a-1 Inventar-Tabelle (erfasst am 2026-10-31, Host "Smartie")
+
+| Gerät | Modell | Seriennummer | by-id (für zpool create) | Rolle (Ziel) |
+|---|---|---|---|---|
+| sdb | WDC WD30EFAX-68JH4N0 (2,7 TB) | WD-WX12D4071P2X | `ata-WDC_WD30EFAX-68JH4N0_WD-WX12D4071P2X` | Unraid-Array → später **tank-Mirror** (1/2) |
+| sdc | WDC WD30EFAX-68JH4N1 (2,7 TB) | WD-WX92D91FJ49T | `ata-WDC_WD30EFAX-68JH4N1_WD-WX92D91FJ49T` | Unraid-Array → später **tank-Mirror** (2/2) |
+| – (nicht angeschlossen) | WDC 3-TB-HDD | **noch zu erfassen** | nach Anschluss via `ls -l /dev/disk/by-id/` | temporärer **bulk**-Pool → später **backup**-Pool |
+| – (nicht angeschlossen) | 250-GB-SSD | **noch zu erfassen** | nach Anschluss erfassen | **Proxmox-OS-Boot** (Phase 2.2) |
+| nvme0n1 | Crucial CT1000P3SSD8 (1 TB) | 2320E6D694BB | `nvme-CT1000P3SSD8_2320E6D694BB` | **fast**-Pool (VM/LXC-Disks, DBs) |
+| sdf | Toshiba MQ01ABD100 (931,5 GB, USB-Intenso-Gehäuse) | X5VBW9D3T | `wwn-0x5000039694984922` | **Externe Backup-Platte** (lokale 2. Kopie, rsync-Ziel) |
+| sda | Intenso Micro Line (3,7 GB) | 04EC7300000007E9 | `usb-Intenso_Micro_Line_04EC7300000007E9-0:0` | **Unraid-Boot-Stick** (im Server; archivieren nach Migration) |
+
+> **Hinweise:** (1) `sdX`-Namen können sich nach Reboots ändern – für `zpool create` ausschließlich die by-id-Namen verwenden. (2) Die Platzhalter `<ARRAY_HDD1_ID>`/`<ARRAY_HDD2_ID>` in Phase 3.1 sind damit aufgelöst: `ata-WDC_WD30EFAX-68JH4N0_WD-WX12D4071P2X` und `ata-WDC_WD30EFAX-68JH4N1_WD-WX92D91FJ49T`. (3) Nach dem Anschluss der dritten HDD und der 250-GB-SSD: Seriennummern hier nachtragen (Befehl: `ls -l /dev/disk/by-id/ | grep -v part`). (4) Der Passphrase-Stick "restic-key2" (Micro Line 3,7 GB – Seriennummer beim nächsten Einstecken erfassen) trägt die Restic-Passphrase; Verwahrung getrennt von "restic-key1" (14,7 GB Silicon-Power).
 
 ### 0.0b SMART-Gate (nur einwandfreie Platten wandern in den ZFS-Pool)
 
