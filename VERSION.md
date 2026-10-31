@@ -4,8 +4,10 @@
 
 | Dokument | Aktuelle Version | Datei |
 |---|---|---|
-| Schritt-für-Schritt-Anleitung (Befehle) | **v1.2.0** | `Home-Lab_Roadmap_Befehle.md` |
-| Roadmap (Übersicht als PDF) | **v1.0.0** | `Home-Lab_Roadmap.pdf` |
+| **Gesamtanleitung (PDF, zum Lesen)** | **v1.2.0** | `Home-Lab_Roadmap_Gesamt.pdf` |
+| Gesamtanleitung (Markdown, Arbeits-/Quellversion) | **v1.2.0** | `Home-Lab_Roadmap_Befehle.md` |
+
+> **Hinweis:** Beide Dateien haben denselben Inhalt – das PDF wird aus dem Markdown erzeugt (`md2pdf.py`). Das frühere, separat gepflegte Übersichts-PDF (`Home-Lab_Roadmap.pdf`, v1.0.0) wurde zugunsten des gemeinsamen Dokuments eingestellt.
 
 > **Regel:** Jede inhaltliche Änderung erhöht die Versionsnummer
 > (Semantik: MAJOR.MINOR.PATCH – neue Phase = MINOR, Korrekturen = PATCH)
@@ -25,6 +27,7 @@
 
 | Version | Dokument | Datum | Änderungen |
 |---|---|---|---|
+| v1.2.0 | Gesamt (md+pdf) | 2026-10-31 | gemeinsames Dokument: PDF aus Markdown erzeugt, altes separates Roadmap-PDF eingestellt; inhaltlich identisch mit v1.2.0-Beschlüssen |
 | v1.2.0 | Befehle (.md) | 2026-10-30 | Beschlüsse aus Alternativ-Anleitungs-Vergleich: Alt-Platten bleiben eingebaut (Migration über temp. bulk-Pool), tank-Mirror + dedizierter backup-Pool mit strikter Abfolge, sanoid/syncoid-Replikation (readonly-Schutz), USB-Platte als lokales restic-Tier, DMZ Option B (Futro in eigenem VLAN, 5-Regel-Set), TrueNAS geprüft und verworfen |
 | v1.1.0 | Befehle (.md) | 2026-10-30 | Migrationssicherheit ergänzt (SMART-Gate, Inventur, Secrets-Export, rsync-Verifikation, Rollback über Alt-Platten, 14-Tage-Beobachtung, nmap-Check) |
 | v1.0.0 | Befehle (.md) | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen und Abschlusstests |
