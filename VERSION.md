@@ -4,7 +4,7 @@
 
 | Dokument | Aktuelle Version | Datei |
 |---|---|---|
-| Schritt-für-Schritt-Anleitung (Befehle) | **v1.1.0** | `Home-Lab_Roadmap_Befehle.md` |
+| Schritt-für-Schritt-Anleitung (Befehle) | **v1.2.0** | `Home-Lab_Roadmap_Befehle.md` |
 | Roadmap (Übersicht als PDF) | **v1.0.0** | `Home-Lab_Roadmap.pdf` |
 
 > **Regel:** Jede inhaltliche Änderung erhöht die Versionsnummer
@@ -25,6 +25,7 @@
 
 | Version | Dokument | Datum | Änderungen |
 |---|---|---|---|
+| v1.2.0 | Befehle (.md) | 2026-10-30 | Beschlüsse aus Alternativ-Anleitungs-Vergleich: Alt-Platten bleiben eingebaut (Migration über temp. bulk-Pool), tank-Mirror + dedizierter backup-Pool mit strikter Abfolge, sanoid/syncoid-Replikation (readonly-Schutz), USB-Platte als lokales restic-Tier, DMZ Option B (Futro in eigenem VLAN, 5-Regel-Set), TrueNAS geprüft und verworfen |
 | v1.1.0 | Befehle (.md) | 2026-10-30 | Migrationssicherheit ergänzt (SMART-Gate, Inventur, Secrets-Export, rsync-Verifikation, Rollback über Alt-Platten, 14-Tage-Beobachtung, nmap-Check) |
 | v1.0.0 | Befehle (.md) | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen und Abschlusstests |
 | v1.0.0 | Roadmap (PDF) | 2026-10-30 | Initiale Version: 5-Seiten-Übersicht mit 4 Phasen und Abschlusstests |

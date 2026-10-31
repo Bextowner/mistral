@@ -1,12 +1,13 @@
 # Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
 
-> **📄 Dokument-Version: v1.1.0** · Stand: 2026-10-30 · Dieses Dokument ist die **aktuellste Version**.
+> **📄 Dokument-Version: v1.2.0** · Stand: 2026-10-30 · Dieses Dokument ist die **aktuellste Version**.
 >
 > ## Änderungshistorie (Changelog)
 >
 > | Version | Datum | Änderungen |
 > |---|---|---|
-> | **v1.1.0 (aktuell)** | 2026-10-30 | Migrationssicherheit ergänzt: 0.0a Inventur, 0.0b SMART-Gate, 0.0c Container-Doku, 0.0d Flash-Backup, 0.0e Secrets-Export; 2.1 rsync-Verifikation + externe Backup-Platte, 2.1a Alt-Platten-Rollback, 2.9a 14-Tage-Beobachtung; 3.4 Platten-Freigabe, 3.5 nmap-Check; Platzhalter-Tabelle erweitert |
+> | **v1.2.0 (aktuell)** | 2026-10-30 | Beschlüsse aus Vergleich mit Alternativ-Anleitung eingearbeitet: Alt-Platten bleiben EINGEBAUT (2.1a umgeschrieben, Migration über temporären bulk-Pool); tank-Mirror-Endziel + dedizierter backup-Pool mit strikter Abfolge (3.1); sanoid/syncoid-Nächtliche Replikation inkl. readonly-Schutz (3.1a); externe USB-Platte als dauerhaftes lokales restic-Tier (3.1b); DMZ-Option B: Futro in eigenem VLAN mit 5-Regel-Set (0.5 erweitert); TrueNAS als Option geprüft und bewusst verworfen (Architektur-Notiz) |
+> | v1.1.0 | 2026-10-30 | Migrationssicherheit ergänzt: 0.0a Inventur, 0.0b SMART-Gate, 0.0c Container-Doku, 0.0d Flash-Backup, 0.0e Secrets-Export; 2.1 rsync-Verifikation + externe Backup-Platte, 2.1a Alt-Platten-Rollback, 2.9a 14-Tage-Beobachtung; 3.4 Platten-Freigabe, 3.5 nmap-Check; Platzhalter-Tabelle erweitert |
 > | v1.0.0 | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen (Hetzner/restic, Futro-Edge-Box, Proxmox-Migration, Finalisierung), Abschlusstests je Phase |
 >
 > **Git-Tags:** Der Stand jeder Version ist über ein Git-Tag (`v1.0.0`, `v1.1.0`, …) im Repository markiert. Änderungen zwischen Versionen: `git diff v1.0.0 v1.1.0` bzw. auf GitHub unter *Releases/Tags* bzw. im Commit-Vergleich.
@@ -26,6 +27,9 @@
 > | `<HETZNER_SUBID>` | Storage Box Sub-ID | `s12345` |
 > | `<NETZ>` | Dein LAN-Subnetz | `192.168.10.0/24` |
 > | `<WG_NETZ>` | WireGuard-Subnetz | `10.10.0.0/24` |
+> | `<ARRAY_HDD1_ID>` / `<ARRAY_HDD2_ID>` | by-id-Kennungen der beiden alten Unraid-Array-Platten | `ata-WDC_WD30..._XXXX` |
+> | `<TEMP_HDD_ID>` | by-id-Kennung der bisher ungenutzten 3-TB-HDD (temp. bulk) | `ata-WDC_WD30..._YYYY` |
+> | `<USB_DISK>` / `<USB_UUID>` | Externe USB-Backup-Platte / ihre UUID (`blkid`) | `/dev/sde` |
 > | `<UNRAID_IP>` | IP des Unraid-Servers (heute) | `192.168.10.30` |
 > | `<EXT_DEV>` | Externe Backup-Platte | `/dev/sdE` |
 > | `<HDD_DEV>` | 3-TB-HDD (Pool-Kandidat) | `/dev/sdb` |
@@ -207,19 +211,36 @@ diff -r /mnt/user/vaultwarden /tmp/restore-test/mnt/user/vaultwarden && echo "RE
 rm -rf /tmp/restore-test
 ```
 
-### 0.5 Netzwerk-/IP-Plan dokumentieren (Beispiel als Ausgangspunkt)
+### 0.5 Netzwerk-/IP-Plan dokumentieren – inkl. DMZ für den Futro (Beschluss v1.2.0, Option B)
 
 ```
-Trusted VLAN 10: 192.168.10.0/24   (Laptops, Handys, Server, T630, Futro)
-IoT VLAN 20:    192.168.20.0/24   (Zigbee-Geraete via Z2M, Kameras, Smart-Home)
-Gast VLAN 30:   192.168.30.0/24   (nur Internet)
+Trusted VLAN 10: 192.168.10.0/24   (Laptops, Handys, Hauptserver, T630)
+DMZ VLAN 20:     192.168.20.0/24   (NUR der Futro: AdGuard, NPM, CrowdSec, DDNS)
+IoT VLAN 30:     192.168.30.0/24   (Zigbee-Geraete via Z2M, Kameras, Smart-Home)
+Gast VLAN 40:    192.168.40.0/24   (nur Internet)
 WG-Netz:        10.10.0.0/24     (WireGuard-Clients)
 
 Feste IPs:
-<FUTRO_IP>  = 192.168.10.5   (Edge-Box: AdGuard, NPM, CrowdSec, DDNS)
-<SRV_IP>    = 192.168.10.10  (Proxmox-Hauptserver)
-<T630_IP>   = 192.168.10.20  (HA, MQTT, Z2M)
+<FUTRO_IP>  = 192.168.20.5   (DMZ! Edge-Box: AdGuard, NPM, CrowdSec, DDNS)
+<SRV_IP>    = 192.168.10.10  (Proxmox-Hauptserver, Trusted)
+<T630_IP>   = 192.168.10.20  (HA, MQTT, Z2M, Trusted)
 ```
+
+**DMZ-Firewall-Regeln auf der UDM (5 Regeln, einmalig einrichten):**
+
+| # | Richtung | Regel | Zweck |
+|---|---|---|---|
+| 1 | Internet → DMZ | erlauben: TCP 80, 443 → `<FUTRO_IP>` | Exposition minimal |
+| 2 | DMZ → Server-VLAN | erlauben: TCP `<NC_PORT>`, `8123` → `<SRV_IP>`/`<T630_IP>` | NPM darf NUR die Backends erreichen |
+| 3 | DMZ → Management (UDM, Proxmox UI, T630 UI) | **BLOCKIEREN** | Kompromittierter Futro sieht keine Admin-UIs |
+| 4 | DMZ → IoT | **BLOCKIEREN** | Kein Sprungbrett zu Kameras/Smart-Home |
+| 5 | Alle → DMZ | erlauben: UDP 53 (DNS → AdGuard); Admin-Zugriff auf Futro nur aus Trusted/VPN | AdGuard-Dienst für alle Netze |
+
+**UDM-Konfiguration (UI):** Networks → Create VLAN Network (DMZ, VLAN-ID 20, Subnet 192.168.20.0/24, kein DHCP nötig – Futro bekommt statische IP) → Firewall → Rules nach obiger Tabelle anlegen (regelmäßig prüfen: DMZ darf initiativ NUR zu Regel-2-Zielen).
+
+**Futro anschließen:** Switch-Port, an dem der Futro hängt, in der UDM auf Port-Profil DMZ/VLAN 20 setzen (Networks → Switch-Port-Konfiguration).
+
+**Architektur-Notiz (Beschluss v1.2.0):** TrueNAS als NAS-Schicht wurde geprüft und **bewusst verworfen** – ZFS läuft direkt auf Proxmox, eine zusätzliche NAS-VM würde nur Verwaltungsaufwand und RAM kosten, ohne Sicherheits- oder Datenmehrwert. Daten liegen in plain ZFS-Datasets, eine spätere Migration bleibt jederzeit möglich.
 
 ### 0.6–0.7 UDM Pro härten (Konsole/GUI-Schritte)
 
@@ -507,25 +528,35 @@ umount /mnt/disks/extern
 # Platte beschriften und physisch verwahren (2. Kopie, unabhaengig von Hetzner!)
 ```
 
-### 2.1a Alte Platten abziehen (Rollback-Sicherung)
+### 2.1a Alt-Platten bleiben EINGEBAUT (Rollback-Sicherung, Beschluss v1.2.0)
+
+Die Unraid-Array-Platten bleiben **eingebaut** und unangetastet. Proxmox wird auf der
+250-GB-SSD installiert; die ungenutzte 3-TB-HDD wird als **temporärer Migrationspool
+`bulk`** verwendet. Die Array-Platten werden erst nach dem 14-Tage-Gate (siehe 2.9a)
+für den `tank`-Mirror freigegeben.
 
 ```
 # 1. Unraid sauber herunterfahren: Main > Array > Stop, dann Tools > Shutdown
-# 2. Netzteil trennen
-# 3. Platten beschriften (UNRAID-DISK1, UNRAID-DISK2, UNRAID-CACHE
-#    + Seriennummer), ausbauen, antistatisch lagern
-# 4. Unraid-USB-Stick separat aufbewahren, NICHT ueberschreiben
-# 5. 250-GB-SSD und die ungenutzte 3-TB-HDD einbauen, NVMe bleibt drin
-# 6. Server startet; BIOS/UEFI zeigt SSD und HDD -> weiter mit 2.2
+# 2. Platten beschriften (UNRAID-DISK1, UNRAID-DISK2, UNRAID-CACHE
+#    + Seriennummer notieren) - sie bleiben EINGEBAUT
+# 3. Unraid-USB-Stick separat aufbewahren, NICHT ueberschreiben
+# 4. 250-GB-SSD und die ungenutzte 3-TB-HDD einbauen, NVMe bleibt drin
+# 5. Server startet; BIOS/UEFI zeigt alle Datentraeger -> weiter mit 2.2
 ```
 
-**NOTFALL-ROLLBACK** (funktioniert nur, solange die Alt-Platten nicht ueberschrieben sind):
+**NOTFALL-ROLLBACK** (Array-Platten wurden nicht angefasst, Unraid-Stick vorhanden):
 ```
 # 1. Proxmox-Host sauber herunterfahren
-# 2. Proxmox-Platten (SSD/NVMe) abziehen
-# 3. Unraid-Platten wieder einbauen, Unraid-Stick anstecken
-# 4. Server starten, Array starten -> Container laufen mit Stand aus 2.1
+# 2. Boot-Reihenfolge im BIOS auf Unraid-USB-Stick umstellen (oder SSD abziehen)
+# 3. Unraid starten, Array starten -> Container laufen mit Stand aus 2.1
+# 4. temporaeren bulk-Pool unangetastet lassen (er haelt die Migrationskopie)
 ```
+
+**Wichtig fuer Phase 3 (tank-Mirror):** Vor dem Ueberbuehren der beiden Array-Platten
+muessen die Daten verifiziert auf `bulk` UND extern (USB-Platte + Hetzner) liegen und
+das 14-Tage-Gate bestanden sein - erst dann werden die Array-Platten geloescht und
+als `tank`-Mirror neu angelegt. Eine Platte nie gleichzeitig als Zwischenpool
+und Backup-Pool verwenden.
 
 ### 2.2 Proxmox installieren
 
@@ -720,15 +751,139 @@ pct restore 999 <BACKUP-DATEI> --storage fast   # Restore-Test in eine Test-CT (
 
 ## Phase 3 – Finalisierung
 
-### 3.1 Dritte HDD: Mirror + dediziertes Backup-Ziel
+### 3.1 tank-Mirror aus den freigegebenen Array-Platten + backup-Pool (Beschluss v1.2.0)
+
+Zeitliche Abfolge STRIKT einhalten:
+1. 14-Tage-Gate bestanden (2.9a), Daten verifiziert auf `bulk` + extern + Hetzner
+2. Zwei alte Array-Platten freigeben -> `tank` als ZFS-Mirror anlegen
+3. Daten von `bulk` nach `tank` migrieren und verifizieren (rsync + Scrub)
+4. ERST DANACH `bulk` leeren und als dedizierten `backup`-Pool neu anlegen
 
 ```bash
-# Empfehlung: 2x3TB als Mirror + 1x3TB separat fuer vzdump
-# (Benoetigt Re-Layout von Phase 2.3; wenn bereits umgesetzt -> ueberspringen)
-zpool create -o ashift=12 bulk mirror /dev/disk/by-id/ata-<HDD1_ID> /dev/disk/by-id/ata-<HDD2_ID>
-zpool create -o ashift=12 backup /dev/disk/by-id/ata-<HDD3_ID>
-zfs create backup/vzdump
-# vzdump-Storage auf backup/vzdump umstellen (GUI: Storage-Pfad aendern)
+# Vorher: Seriennummern der beiden Array-Platten erneut abgleichen!
+ls -l /dev/disk/by-id/ | grep -E "<ARRAY_HDD1_ID>|<ARRAY_HDD2_ID>"
+
+# tank-Mirror anlegen (Achtung: ueberschreibt die beiden alten Array-Platten!):
+zpool create -o ashift=12 tank mirror /dev/disk/by-id/<ARRAY_HDD1_ID> /dev/disk/by-id/<ARRAY_HDD2_ID>
+zfs set compression=lz4 tank
+zfs set atime=off tank
+zfs create tank/nextcloud tank/paperless tank/immich tank/documents tank/cameras
+zpool status -v tank
+
+# Datenmigration bulk -> tank (Dienste vorher stoppen!):
+# Erst Dry-Run, dann Echtlauf, dann Verifikation:
+rsync -aHAXn --info=progress2 --itemize-changes /bulk/nextcloud/ /tank/nextcloud/
+rsync -aHAX --info=progress2 /bulk/nextcloud/ /tank/nextcloud/
+rsync -aHAXcn --itemize-changes /bulk/nextcloud/ /tank/nextcloud/   # MUSS leer sein
+# (analog fuer alle weiteren Datasets; danach Scrub:)
+zpool scrub tank
+
+# Erst wenn ALLES auf tank verifiziert liegt UND Dienste auf tank laufen:
+zpool destroy bulk
+zpool create -o ashift=12 backup /dev/disk/by-id/<TEMP_HDD_ID>
+zfs set compression=lz4 backup
+zfs set atime=off backup
+zfs create backup/tank-repl
+zfs create backup/fast-repl
+zpool status -v backup
+```
+
+### 3.1a sanoid/syncoid – nächtliche ZFS-Replikation (Beschluss v1.2.0)
+
+```bash
+# Installation (Debian/Proxmox-Paketquellen):
+apt install -y sanoid syncoid
+
+# /etc/sanoid/sanoid.conf anlegen:
+cat > /etc/sanoid/sanoid.conf <<'EOF'
+[tank/nextcloud]
+use_template = production
+
+[tank/paperless]
+use_template = production
+
+[tank/immich]
+use_template = production
+
+[tank/documents]
+use_template = production
+
+[tank/cameras]
+use_template = camera
+
+[fast]
+use_template = production
+
+[template_production]
+frequently = 0
+hourly = 24
+daily = 14
+monthly = 6
+
+[template_camera]
+frequently = 0
+hourly = 0
+daily = 1
+monthly = 0
+EOF
+
+# Snapshots sofort testen:
+sanoid --take-snapshots
+zfs list -t snapshot | head
+
+# Replikation manuell testen (vor dem Cron):
+syncoid --recursive tank backup/tank-repl
+syncoid fast backup/fast-repl
+
+# Nachtcron einrichten:
+echo "15 2 * * * root /usr/sbin/sanoid --take-snapshots && /usr/sbin/syncoid --recursive tank backup/tank-repl && /usr/sbin/syncoid fast backup/fast-repl" \
+  > /etc/cron.d/syncoid-nightly
+chmod 644 /etc/cron.d/syncoid-nightly
+
+# WICHTIG (Ransomware-Schutz): backup-Pool danach read-only setzen:
+zfs set readonly=on backup/tank-repl
+zfs set readonly=on backup/fast-repl
+# syncoid hebt readonly beim Schreiben kurz auf; vor Manipulation schuetzt es trotzdem.
+
+# Restore-Test aus dem Replikat (PFLICHT, nicht nur Status ablesen):
+zfs send backup/tank-repl/nextcloud@autosnap_$(date +%F)* \
+  | zfs receive tank/restore-test
+ls /tank/restore-test && zfs destroy -r tank/restore-test
+```
+
+### 3.1b Externe USB-Platte als lokales Backup-Tier (Beschluss v1.2.0)
+
+Die vorhandene 1-TB-USB-3.0-Platte wird **dauerhaft angeschlossen** und als
+zweites lokales restic-Ziel genutzt (schnelle Wiederherstellung ohne Hetzner).
+Hinweis: Dauerhaft verbunden = KEINE Offline-Kopie; als Offline-Disziplin gilt
+der restic-Historie auf Hetzner plus optionaler monatlicher manueller Pull.
+
+```bash
+# Platte formatieren (ACHTUNG: loescht alles, vorher lsblk!):
+lsblk
+mkfs.ext4 -L usb-backup /dev/<USB_DISK>1
+mkdir -p /mnt/usb-backup
+
+# /etc/fstab Eintrag (dauerhaft, mit nofail fuer Robustheit):
+echo "/dev/disk/by-uuid/<USB_UUID> /mnt/usb-backup ext4 defaults,nofail,x-systemd.device-timeout=30 0 2" >> /etc/fstab
+mount -a
+
+# Zweites restic-Repository initialisieren:
+export RESTIC_REPOSITORY="/mnt/usb-backup/restic"
+export RESTIC_PASSWORD="<RESTIC_PASSPHRASE>"   # gleiche Passphrase wie Hetzner
+restic init
+
+# Backup-Skript erweitern (nach dem Hetzner-Run):
+cat >> /usr/local/bin/backup-offsite.sh <<'EOF'
+# Lokale USB-Kopie (schnelle Wiederherstellung ohne Cloud):
+RESTIC_REPOSITORY=/mnt/usb-backup/restic restic backup /tank/nextcloud /tank/paperless \
+  /tank/immich /tank/documents /fast/vmdata --tag usb-local
+RESTIC_REPOSITORY=/mnt/usb-backup/restic restic forget --keep-daily 7 --prune
+EOF
+
+# OPTIONAL (empfohlen, echte Offline-Kopie): monatlich 10 Min. abziehen
+# - Platte abstecken -> separate volle Kopie nicht noetig, Restic-Historie reicht
+# - Kalender-Reminder einrichten: "1. des Monats: USB-Platte kurz pruefen + abziehen"
 ```
 
 ### 3.2 Kamera-Dataset aufräumen
