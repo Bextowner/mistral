@@ -1,11 +1,13 @@
 # Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
 
-> **📄 Dokument-Version: v1.2.2** · Stand: 2026-10-31 · Dieses Dokument ist die **aktuellste Version**.
+> **📄 Dokument-Version: v1.2.3** · Stand: 2026-11-01 · Dieses Dokument ist die **aktuellste Version**.
 >
 > ## Änderungshistorie (Changelog)
 >
 > | Version | Datum | Änderungen |
 > |---|---|---|
+> | **v1.2.3 (aktuell)** | 2026-11-01 | Migrations-Sonntag-Ergebnisse: Phase-0-Abnahme erteilt (SMART-Gate sdb via Zonentest-Kompensation 279GiB @ 84,7 MB/s fehlerfrei); restic-Initial 536,6 GiB auf Hetzner erfolgreich, Cron scharf; verbindliches Storage-Layout (Dataset-Tabelle mit Besitzern: photos/documents/cloud/media/cameras/backup); tank/cloud-Definition (Sync-Dateien, kein Archiv); Dokumenten-Struktur ulli/nadine/familie; Paperless-Philosophie A (DB-zentriert, Storage-Paths, Altdaten-Import, DB-Dump im Backup); Vaultwarden-first-Prinzip + Credential-Handling Migrationsphase; Hardware: GPU + Coral ausgebaut (Frigate-Relikte), 10G-Netzwerkkarte verworfen (Engpassanalyse), Investitionspriorität RAM/Storage; Unraid-Cron-Syntax-Warnung (kein Benutzerfeld!); SSH-Port 2002 + Key-Auth; Dashboard status-cli.sh; logrotate-Baustein für Phase 3 |
+> | v1.2.2 | 2026-10-31 |
 > | **v1.2.2 (aktuell)** | 2026-10-31 | Praxis-Erkenntnisse eingearbeitet: Inventar-Tabelle 0.0a-1 mit erfassten Seriennummern/by-IDs (WD30EFAX x2, CT1000P3SSD8, MQ01ABD100); Hetzner-Sub-Account-SSH-Key-Prozedur (Key via SFTP in ~/.ssh/authorized_keys, Sub-Account-Domain u706080-sub1.your-storagebox.de); Unraid-Hinweis /tmp=RAM (keine großen Restore-Ziele); domains/Macinabox wird nicht migriert (nur lokale Archiv-Kopie); Restore-Repeat mit Macinabox-Exclude |
 > | v1.2.1 | 2026-10-31 | Gemeinsames Dokument: PDF aus Markdown erzeugt, altes Roadmap-PDF eingestellt |
 > | **v1.2.0 (aktuell)** | 2026-10-30 | Beschlüsse aus Vergleich mit Alternativ-Anleitung eingearbeitet: Alt-Platten bleiben EINGEBAUT (2.1a umgeschrieben, Migration über temporären bulk-Pool); tank-Mirror-Endziel + dedizierter backup-Pool mit strikter Abfolge (3.1); sanoid/syncoid-Nächtliche Replikation inkl. readonly-Schutz (3.1a); externe USB-Platte als dauerhaftes lokales restic-Tier (3.1b); DMZ-Option B: Futro in eigenem VLAN mit 5-Regel-Set (0.5 erweitert); TrueNAS als Option geprüft und bewusst verworfen (Architektur-Notiz) |
@@ -39,6 +41,94 @@
 > | `<SHARE_MIT_PLATZ>` | Unraid-Share mit Platz für Doku/Backups | `backup` |
 
 **Golden Rule vor jedem Schritt:** Aktuelles Backup vorhanden? Dann erst weitermachen.
+
+---
+
+## Verbindliche Architektur-Beschlüsse (Phase-0-Abnahme 2026-11-01)
+
+### A. Storage-Layout tank (verbindlich für Phase 2.3/3.1)
+
+| Dataset | Besitzer (schreibend) | Konsumenten (lesend) | Backup-Priorität |
+|---|---|---|---|
+| `tank/photos` | Immich | HA, Nextcloud via External Storage | hoch (production-Template) |
+| `tank/documents` | Paperless | Nextcloud via External Storage | hoch |
+| `tank/cloud` | Nextcloud | – | hoch |
+| `tank/media/movies` | – (manuelle Ablage) | Jellyfin (perspektivisch) | mittel |
+| `tank/media/music` | – (manuelle Ablage) | Music Assistant, Jellyfin | mittel |
+| `tank/cameras` | Reolink (SMB) | HA, 14-Tage-Cleanup | niedrig (kein Offsite) |
+| `tank/backup` | Proxmox-Host | – | Systemsicherung |
+
+**Regel:** Pro Dataset genau EIN schreibender Besitzer – alle anderen Zugriffe read-only oder via External-Storage-Bindung.
+
+**`tank/cloud`-Definition:** Ausschließlich Nextcloud-Sync-Dateien (persönliche Dokumente, Sync-Ordner, kleine App-Syncs). KEIN Archiv, KEINE Fotos (→ photos), KEINE Medien (→ media), KEINE Dienst-Datenbanken.
+
+**Dokumenten-Struktur (wird von Paperless-Storage-Paths generiert, nicht manuell gepflegt):**
+```
+tank/documents/
+├── ulli/        (Tag-basiert generiert)
+├── nadine/
+├── familie/     (wohnen, versicherungen, fahrzeuge, gesundheit...)
+└── _archiv/
+```
+
+### B. Paperless-Philosophie A: datenbankzentriert (Beschluss)
+
+- Paperless verwaltet ALLE Dokumente (WebUI/App als primärer Zugang)
+- Struktur entsteht über Tags (ulli/nadine/familie) + Dokumenttypen + **Storage-Paths**:
+  `tank/documents/{tag_person}/{document_type}/{created_year}/{title}`
+- Ordner auf tank/documents sind das automatisch generierte Abbild, NICHT manuell sortieren
+- Altdaten-Migration (120 GB): Import über Paperless-Mechanik (consume), NICHT direkt in originals/ kopieren
+- Backup-Skript-Erweiterung: `pg_dump` der Paperless-DB vor dem restic-Datei-Backup
+- Nextcloud-Anbindung: tank/documents als External Storage (lesen + Scan-Ablage in Consume-Bereich)
+
+### C. Migrationsreihenfolge: Vaultwarden-first (Beschluss)
+
+1. Proxmox-Host installiert + gehärtet (2FA, SSH-Key)
+2. ZFS-Pools + Datasets
+3. WireGuard-Zugang (UDM) verifiziert
+4. **Vaultwarden-LXC – Prio 1** (Restore aus restic-Bestand, VPN-only)
+5. NPM + CrowdSec auf Futro (Phase 1)
+6. Weitere LXCs (Paperless, Nextcloud, Immich, Traccar) – Credentials direkt in Vaultwarden
+
+**Credential-Handling Migrationsphase:** Übergangs-Credentials verschlüsselt auf Laptop (KeePassXC/gpg-Zip, NIEMALS Klartext), nach Vaultwarden-Livegabe einpflegen, Übergangsdatei löschen. Ausgenommen von Vaultwarden: restic-Passphrase (bleibt auf den 2 USB-Sticks, Henne-Ei-Prinzip).
+
+### D. Hardware-Beschlüsse (2026-11-01)
+
+| Beschluss | Begründung |
+|---|---|
+| **GPU ausbauen** (einmotten, antistatisch) | Frigate gestrichen – kein Zweck; Reserve für späteres evtl. Jellyfin-Transcoding |
+| **Coral ausbauen** (einmotten) | Frigate-Relikt, kein Zweck im Zielbild |
+| 10G-Netzwerkkarte verworfen | Engpassanalyse: 2.5GbE > alle realen Workloads (WAN 300M, Clients GbE, HDDs ~180 MB/s) |
+| Investitionspriorität: RAM (2×32 GB erst bei ARC-Trefferquote <90 %) → Storage | Realistische Workload-Analyse |
+| Schrank-Fund: 3-TB-HDD (WD Red/IronWolf) | Pool-Kandidat #3, beim Aufschrauben anschließen + SMART-testen |
+
+**Aufschraub-Checkliste:** Schrank-3TB + dritte HDD + 250-GB-SSD einbauen · GPU + Coral ausbauen · Seriennummern/by-IDs erfassen · SMART-Tests der Neuzugänge
+
+### E. Betriebliche Lektionen aus Phase 0 (Unraid-spezifisch)
+
+1. **Unraid-cron.d-Dateien haben KEIN Benutzerfeld!** Debian-Syntax `… root befehl` erzeugt Minutentakt-Spam (`root: command not found`). Syntax: `0 3 * * * bash /pfad/skript.sh`
+2. **Unraid-/tmp liegt im RAM** – keine großen Restore-Ziele dorthin (Sparse-Dateien sprengen das RAM)
+3. SSH aktiv mit Port 2002 + Key-Auth (Laptop-Key hinterlegt)
+4. Status-Dashboard: `bash /boot/custom/homelab-status/status-cli.sh` – Aufruf vom Laptop via `watch -n 30 'ssh -p 2002 root@<UNRAID_IP> bash /boot/custom/homelab-status/status-cli.sh'`
+5. Hetzner-Storage-Box-Sub-Accounts: eigene Domain (`uXXXXX-sub1.your-storagebox.de`), Key via SFTP in `~/.ssh/authorized_keys`, restricted Shell (keine Pipes/Redirects)
+6. SMART-Longtest-WD30EFAX-Quirk: Hänger bei 10 % Remaining ohne Plattendefekt – Kompensation via dd-Zonen-Vollltest (279 GiB @ 84,7 MB/s fehlerfrei = Abnahme mit Vermerk)
+7. Dashboard/Webserver-Versuche auf Unraid obsolet (kein busybox/python im PATH) – CLI-Dashboard via SSH ist der Weg
+
+### F. Logrotate-Baustein (Phase 3, auf Proxmox-Host)
+
+```bash
+# /etc/logrotate.d/restic-backup
+/var/log/restic.log /var/log/restic-first.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    delaycompress
+}
+```
+
+---
 
 **Leitlinie:** Datensicherheit vor Geschwindigkeit.
 

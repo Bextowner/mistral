@@ -32,3 +32,13 @@
 | v1.1.0 | Befehle (.md) | 2026-10-30 | Migrationssicherheit ergänzt (SMART-Gate, Inventur, Secrets-Export, rsync-Verifikation, Rollback über Alt-Platten, 14-Tage-Beobachtung, nmap-Check) |
 | v1.0.0 | Befehle (.md) | 2026-10-30 | Initiale Version: 4 Phasen mit Befehlen und Abschlusstests |
 | v1.0.0 | Roadmap (PDF) | 2026-10-30 | Initiale Version: 5-Seiten-Übersicht mit 4 Phasen und Abschlusstests |
+
+## v1.2.3 (2026-11-01) – Phase-0-Abnahme & Architektur-Beschlüsse
+
+Phase 0 formell abgenommen (außer UDM-Hardening-Block): SMART-Gate bestanden
+(sdc formell, sdb via Zonen-Vollltest-Kompensation), restic-Initial 536,6 GiB
+auf Hetzner, Cron scharf, lokale Vollkopie verifiziert.
+
+Neue verbindliche Beschlüsse: Storage-Layout (Dataset-Besitzer-Matrix),
+Paperless-Philosophie A, Vaultwarden-first-Migrationsreihenfolge,
+Credential-Handling, GPU/Coral-Ausbau, 10G-Verzicht.
