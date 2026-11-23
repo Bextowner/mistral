@@ -1,12 +1,13 @@
 # Home-Lab Umstellung: Schritt-für-Schritt-Anleitung mit Befehlen
 
-> **📄 Dokument-Version: v1.2.3** · Stand: 2026-11-01 · Dieses Dokument ist die **aktuellste Version**.
+> **📄 Dokument-Version: v1.3.0** · Stand: 2026-11-23 · Dieses Dokument ist die **aktuellste Version**.
 >
 > ## Änderungshistorie (Changelog)
 >
 > | Version | Datum | Änderungen |
 > |---|---|---|
-> | **v1.2.3 (aktuell)** | 2026-11-01 | Migrations-Sonntag-Ergebnisse: Phase-0-Abnahme erteilt (SMART-Gate sdb via Zonentest-Kompensation 279GiB @ 84,7 MB/s fehlerfrei); restic-Initial 536,6 GiB auf Hetzner erfolgreich, Cron scharf; verbindliches Storage-Layout (Dataset-Tabelle mit Besitzern: photos/documents/cloud/media/cameras/backup); tank/cloud-Definition (Sync-Dateien, kein Archiv); Dokumenten-Struktur ulli/nadine/familie; Paperless-Philosophie A (DB-zentriert, Storage-Paths, Altdaten-Import, DB-Dump im Backup); Vaultwarden-first-Prinzip + Credential-Handling Migrationsphase; Hardware: GPU + Coral ausgebaut (Frigate-Relikte), 10G-Netzwerkkarte verworfen (Engpassanalyse), Investitionspriorität RAM/Storage; Unraid-Cron-Syntax-Warnung (kein Benutzerfeld!); SSH-Port 2002 + Key-Auth; Dashboard status-cli.sh; logrotate-Baustein für Phase 3 |
+> | **v1.3.0 (aktuell)** | 2026-11-23 | Beschluss: **KEIN Tailscale** (WireGuard auf der UDM bleibt einziger Remote-Zugang); Phase-1-Review: Backends bis Phase 2 auf Unraid (`<UNRAID_IP>`) + Firewall-Regel 2 temporär erweitern, NPM-Admin nur per SSH-Tunnel erreichbar, CrowdSec-Log-Mount korrigiert, restic-Zugang für den Futro ergänzt |
+> | v1.2.3 | 2026-11-01 | Migrations-Sonntag-Ergebnisse: Phase-0-Abnahme erteilt (SMART-Gate sdb via Zonentest-Kompensation 279GiB @ 84,7 MB/s fehlerfrei); restic-Initial 536,6 GiB auf Hetzner erfolgreich, Cron scharf; verbindliches Storage-Layout (Dataset-Tabelle mit Besitzern: photos/documents/cloud/media/cameras/backup); tank/cloud-Definition (Sync-Dateien, kein Archiv); Dokumenten-Struktur ulli/nadine/familie; Paperless-Philosophie A (DB-zentriert, Storage-Paths, Altdaten-Import, DB-Dump im Backup); Vaultwarden-first-Prinzip + Credential-Handling Migrationsphase; Hardware: GPU + Coral ausgebaut (Frigate-Relikte), 10G-Netzwerkkarte verworfen (Engpassanalyse), Investitionspriorität RAM/Storage; Unraid-Cron-Syntax-Warnung (kein Benutzerfeld!); SSH-Port 2002 + Key-Auth; Dashboard status-cli.sh; logrotate-Baustein für Phase 3 |
 > | v1.2.2 | 2026-10-31 |
 > | **v1.2.2 (aktuell)** | 2026-10-31 | Praxis-Erkenntnisse eingearbeitet: Inventar-Tabelle 0.0a-1 mit erfassten Seriennummern/by-IDs (WD30EFAX x2, CT1000P3SSD8, MQ01ABD100); Hetzner-Sub-Account-SSH-Key-Prozedur (Key via SFTP in ~/.ssh/authorized_keys, Sub-Account-Domain u706080-sub1.your-storagebox.de); Unraid-Hinweis /tmp=RAM (keine großen Restore-Ziele); domains/Macinabox wird nicht migriert (nur lokale Archiv-Kopie); Restore-Repeat mit Macinabox-Exclude |
 > | v1.2.1 | 2026-10-31 | Gemeinsames Dokument: PDF aus Markdown erzeugt, altes Roadmap-PDF eingestellt |
@@ -127,6 +128,15 @@ tank/documents/
     delaycompress
 }
 ```
+
+### G. Kein Tailscale (Beschluss v1.3.0, 2026-11-23)
+
+**WireGuard auf der UDM Pro (Phase 0.8) bleibt der EINZIGE Remote-Zugang.** Tailscale wird nicht eingeführt:
+
+- **Kein Mehrwert** gegenüber dem bestehenden WireGuard: öffentliche WAN-IP (kein CGNAT/NAT-Traversal nötig), ein Standort, Client-Einrichtung per QR-Code. Zugriffssteuerung existiert bereits über UDM-Firewall-Regeln + NPM-Access-Lists.
+- **Tailscale Funnel/Serve würde den DMZ-Rand (Futro/NPM/CrowdSec) umgehen** — bewusst nicht gewollt; öffentliche Dienste bleiben auf Port-Forward 80/443 → Futro.
+- **Fremder Control-Plane** (Login über Drittanbieter-SSO) kollidiert mit dem Ansatz „möglichst wenig Fremdes" (UDM lokal gehärtet). Self-hosted **headscale** wäre ein zusätzlicher Dienst in der DMZ und würde die Angriffsfläche der Edge-Box vergrößern.
+- **Future:** Tailscale SSH (identitätsbasiert, optional Session-Recording) kann später isoliert fürs Server-Management nachgerüstet werden — ohne Änderung am VPN-/DMZ-Design. Falls eingeführt: `100.64.0.0/10` firewall-seitig exakt wie `<WG_NETZ>` behandeln.
 
 ---
 
@@ -470,7 +480,7 @@ services:
     volumes:
       - ./config:/etc/crowdsec
       - ./data:/var/lib/crowdsec
-      - nginx-logs:/var/log/nginx:ro
+      - ./npm-data/log/nginx:/var/log/nginx:ro   # v1.3.0: NPM schreibt Logs nach /data/log/nginx (npm-data-Volume)
   npm:
     image: jc21/nginx-proxy-manager:latest
     container_name: npm
@@ -482,8 +492,6 @@ services:
     volumes:
       - ./npm-data:/data
       - ./npm-letsencrypt:/etc/letsencrypt
-volumes:
-  nginx-logs:
 EOF
 docker compose up -d
 
@@ -492,7 +500,9 @@ docker exec crowdsec cscli bouncers add npm-bouncer
 # -> Ausgabe: <BOUNCER_KEY>
 
 # Middleware in NPM: Stream-Config + CrowdSec-Bouncer (Plugin) einbinden:
-# Im NPM-Admin-UI (http://<FUTRO_IP>:81, admin/changeme sofort aendern!)
+# v1.3.0: Admin-UI ist auf 127.0.0.1 gebunden -> Zugriff NUR per SSH-Tunnel (von Geraet in Trusted-VLAN/VPN):
+#   ssh -L 8181:127.0.0.1:81 <USER>@<FUTRO_IP>
+#   dann im Browser: http://127.0.0.1:8181   (admin/changeme sofort aendern!)
 # unter Settings -> crowdsec die <BOUNCER_KEY> eintragen.
 
 # CrowdSec-Status pruefen:
@@ -532,11 +542,12 @@ docker compose up -d
 curl -s http://127.0.0.1:8000/update   # manuelles Update triggern, dann Provider-Konsole pruefen
 ```
 
-### 1.7 NPM Proxy-Hosts anlegen (im Admin-UI `http://<FUTRO_IP>:81`)
+### 1.7 NPM Proxy-Hosts anlegen (im Admin-UI, siehe 1.5: per SSH-Tunnel `http://127.0.0.1:8181`)
 
-- Proxy-Host `cloud.<DOMAIN>` → `http://<SRV_IP>:<PORT_NEXTCLOUD>` (Let's-Encrypt-Zertifikat, HTTP-Verifikation)
+- Proxy-Host `cloud.<DOMAIN>` → `http://<UNRAID_IP>:<PORT_NEXTCLOUD>` (**bis Phase 2**, danach `<SRV_IP>`) — Let's-Encrypt-Zertifikat, HTTP-Verifikation
 - Proxy-Host `ha.<DOMAIN>` → `http://<T630_IP>:8123`
 - Erzwingen: „Websockets Support" für HA aktivieren
+- **v1.3.0-Hinweis:** Bis Phase 2 laufen Nextcloud/Vaultwarden noch auf Unraid (`<UNRAID_IP>` = 192.168.10.30) — Firewall-Regel 2 (DMZ→Server-VLAN) temporär um `TCP <PORT_NEXTCLOUD>,<PORT_VAULTWARDEN> → <UNRAID_IP>` erweitern und nach dem Phase-2-Cutover wieder entfernen.
 
 ### 1.8 Cutover Port-Forwards (UDM-UI)
 
@@ -548,7 +559,7 @@ curl -s http://127.0.0.1:8000/update   # manuelles Update triggern, dann Provide
 
 ### 1.9 Vaultwarden nur via VPN
 
-1. NPM: Proxy-Host `vault.<DOMAIN>` → `http://<SRV_IP>:<PORT_VAULTWARDEN>`
+1. NPM: Proxy-Host `vault.<DOMAIN>` → `http://<UNRAID_IP>:<PORT_VAULTWARDEN>` (bis Phase 2, danach `<SRV_IP>` — siehe 1.7-Hinweis)
 2. NPM: Access List „vpn-only" anlegen: erlaubt `10.10.0.0/24` (WG-Netz), alle anderen blockiert
 3. Access List dem Proxy-Host zuweisen
 
@@ -563,8 +574,12 @@ curl -k https://vault.<DOMAIN> | head -3
 
 ```bash
 # Compose-Configs ins restic-Backup:
+# v1.3.0: eigener Storage-Box-Sub-Account mit Subpath + eigener restic-Key für den Futro anlegen
+# (Mechanik wie Phase 0.1), /etc/restic-env auf den Futro kopieren, dann:
 source /etc/restic-env
 restic backup ~/edge --tag futro-config
+# Cron auf dem Futro (Root-Crontab via `sudo crontab -e`, dort KEIN Benutzerfeld):
+#   0 3 * * * . /etc/restic-env && restic backup ~/edge --tag futro-config >> /var/log/restic-futro.log 2>&1
 
 # SSD-Image mit Clonezilla (von USB-Stick booten, Futro-SSD -> externen USB-Stick klonen)
 # Alternativ live (Futro im Single-User/Recovery), grob:

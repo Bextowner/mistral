@@ -9,11 +9,11 @@ Migration Unraid → Proxmox mit Netzwerk-Konsolidierung, DMZ, ZFS-Storage und 3
 | **`Home-Lab_Roadmap_Gesamt.pdf`** | **Die Gesamtanleitung zum Lesen** (Laptop/Tab) – alle Phasen, Befehle und Abschlusstests in einem Dokument |
 | `Home-Lab_Roadmap_Befehle.md` | Arbeits- und Quellversion (Markdown) – Basis für das PDF, zum direkten Copy-Paste der Befehle |
 
-**Beide Dateien haben denselben Inhalt (v1.2.0)** – das PDF wird aus dem Markdown erzeugt. Bei Änderungen: Markdown anpassen, PDF neu generieren, Version in beiden erhöhen (siehe `VERSION.md`).
+**Beide Dateien haben denselben Inhalt (v1.3.0)** – das PDF wird aus dem Markdown erzeugt. Bei Änderungen: Markdown anpassen, PDF neu generieren, Version in beiden erhöhen (siehe `VERSION.md`).
 
 ## 🏷️ Versionierung
 
-Aktuelle Version: **v1.2.0** (siehe `VERSION.md` für das vollständige Changelog und die Regeln). Jede Version erhält ein Git-Tag – Versionsvergleich über [Tags](https://github.com/Bextowner/mistral/tags).
+Aktuelle Version: **v1.3.0** (siehe `VERSION.md` für das vollständige Changelog und die Regeln). Jede Version erhält ein Git-Tag – Versionsvergleich über [Tags](https://github.com/Bextowner/mistral/tags).
 
 ## Architektur (Beschlüsse)
 
